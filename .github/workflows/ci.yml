@@ -1,0 +1,99 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # 1) Instala dependências e testa a aplicação rodando direto no Node
+  test:
+    name: Testar aplicação
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Subir servidor e testar endpoint
+        run: |
+          npm start &
+          sleep 3
+          RESPOSTA=$(curl -s http://localhost:3000/)
+          echo "Resposta: $RESPOSTA"
+          test "$RESPOSTA" = "Hello World!"
+
+  # 2) Constrói a imagem Docker e testa o container
+  docker:
+    name: Build e teste da imagem Docker
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Build da imagem
+        run: docker build -t hello-world-express:ci .
+
+      - name: Rodar container e testar endpoint
+        run: |
+          docker run -d --name app -p 3000:3000 hello-world-express:ci
+          sleep 3
+          RESPOSTA=$(curl -s http://localhost:3000/)
+          echo "Resposta: $RESPOSTA"
+          docker logs app
+          test "$RESPOSTA" = "Hello World!"
+
+      - name: Parar container
+        if: always()
+        run: docker rm -f app || true
+
+  # 3) Publica a imagem no GitHub Container Registry (só em push na main)
+  publish:
+    name: Publicar imagem no GHCR
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Login no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Gerar tags da imagem
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      - name: Build e push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
